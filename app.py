@@ -54,23 +54,43 @@ LIVE_PERIOD_MAP = {
 def fetch_yf_history(period="6mo", interval="1d"):
     frames = []
     for label, ticker in YF_TICKERS.items():
-        hist = yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False)
+        try:
+            hist = yf.download(
+                ticker,
+                period=period,
+                interval=interval,
+                auto_adjust=False,
+                progress=False,
+                ignore_tz=False,
+                threads=False,
+            )
+        except Exception:
+            continue
         if hist is None or hist.empty:
             continue
         if isinstance(hist.columns, pd.MultiIndex):
             hist.columns = hist.columns.get_level_values(0)
+        index_name = hist.index.name or 'Date'
         hist = hist.reset_index()
         if 'Datetime' in hist.columns and 'Date' not in hist.columns:
             hist = hist.rename(columns={'Datetime': 'Date'})
-        if 'Date' not in hist.columns:
+        elif index_name in hist.columns and index_name != 'Date':
+            hist = hist.rename(columns={index_name: 'Date'})
+        elif 'Date' not in hist.columns:
             hist = hist.rename(columns={hist.columns[0]: 'Date'})
+
+        hist['Date'] = pd.to_datetime(hist['Date'], utc=True, errors='coerce').dt.tz_convert(None)
+        hist = hist.dropna(subset=['Date', 'Close'])
+        if hist.empty:
+            continue
+
         hist['Metric'] = label
         hist['Ticker'] = ticker
         frames.append(hist[['Date', 'Open', 'High', 'Low', 'Close', 'Volume', 'Metric', 'Ticker']])
     if not frames:
         return pd.DataFrame(columns=['Date', 'Open', 'High', 'Low', 'Close', 'Volume', 'Metric', 'Ticker'])
     df = pd.concat(frames, ignore_index=True)
-    df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None)
+    df = df.sort_values(['Metric', 'Date']).reset_index(drop=True)
     return df
 
 @st.cache_data(ttl=1800)
