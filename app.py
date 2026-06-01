@@ -37,6 +37,17 @@ CHART_COLORS = {
     "USDINR": "#0891b2",
     "India VIX": "#dc2626",
     "Nifty": "#16a34a",
+    "FII Net Cash": "#b91c1c",
+    "DII Net Cash": "#15803d",
+}
+
+LIVE_PERIOD_MAP = {
+    "1m": "1d",
+    "2m": "1d",
+    "5m": "5d",
+    "15m": "1mo",
+    "30m": "1mo",
+    "60m": "3mo",
 }
 
 @st.cache_data(ttl=900)
@@ -49,6 +60,8 @@ def fetch_yf_history(period="6mo", interval="1d"):
         if isinstance(hist.columns, pd.MultiIndex):
             hist.columns = hist.columns.get_level_values(0)
         hist = hist.reset_index()
+        if 'Datetime' in hist.columns and 'Date' not in hist.columns:
+            hist = hist.rename(columns={'Datetime': 'Date'})
         if 'Date' not in hist.columns:
             hist = hist.rename(columns={hist.columns[0]: 'Date'})
         hist['Metric'] = label
@@ -62,7 +75,7 @@ def fetch_yf_history(period="6mo", interval="1d"):
 
 @st.cache_data(ttl=1800)
 def fetch_fii_dii():
-    url = 'https://www.moneycontrol.com/markets/fii-dii-data/cash/'
+    url = 'https://www.nseindia.com/reports/fii-dii'
     headers = {'User-Agent': 'Mozilla/5.0'}
     out = {'date': None, 'fii_net': None, 'dii_net': None, 'source': url}
     try:
@@ -72,41 +85,29 @@ def fetch_fii_dii():
         for t in tables:
             cols = [str(c).strip().lower() for c in t.columns]
             joined = ' | '.join(cols)
-            if ('fii' in joined or 'dii' in joined) and ('net' in joined or 'buy / sell' in joined or 'gross' in joined):
+            if 'category' in joined and 'date' in joined and 'net value' in joined:
                 picked = t.copy()
                 break
-        if picked is None and tables:
-            picked = tables[0].copy()
         if picked is None or picked.empty:
             return out
         picked.columns = [str(c).strip() for c in picked.columns]
-        picked = picked.dropna(how='all')
-        txt = picked.astype(str)
-        txt_lower = txt.apply(lambda s: s.str.lower())
-        role_col = None
-        for c in picked.columns:
-            if txt_lower[c].str.contains('fii|fpi|dii', regex=True).any():
-                role_col = c
-                break
+        category_col = next((c for c in picked.columns if 'category' in c.lower()), None)
         date_col = next((c for c in picked.columns if 'date' in c.lower()), None)
-        net_col = next((c for c in picked.columns if 'net' in c.lower()), None)
-        if role_col is not None and net_col is not None:
-            latest_date = None
-            fii_net = None
-            dii_net = None
-            for _, row in picked.iterrows():
-                role = str(row[role_col]).lower()
-                val = pd.to_numeric(str(row[net_col]).replace(',', ''), errors='coerce')
-                dval = pd.to_datetime(row[date_col], errors='coerce') if date_col else pd.NaT
-                if 'fii' in role or 'fpi' in role:
-                    fii_net = val if pd.notna(val) else fii_net
-                    latest_date = dval if pd.notna(dval) else latest_date
-                if 'dii' in role:
-                    dii_net = val if pd.notna(val) else dii_net
-                    latest_date = dval if pd.notna(dval) else latest_date
-            out['date'] = None if latest_date is None or pd.isna(latest_date) else latest_date.date().isoformat()
-            out['fii_net'] = None if fii_net is None or pd.isna(fii_net) else float(fii_net)
-            out['dii_net'] = None if dii_net is None or pd.isna(dii_net) else float(dii_net)
+        net_col = next((c for c in picked.columns if 'net value' in c.lower()), None)
+        if not category_col or not date_col or not net_col:
+            return out
+        picked = picked.dropna(how='all')
+        for _, row in picked.iterrows():
+            role = str(row[category_col]).strip().lower()
+            val = pd.to_numeric(str(row[net_col]).replace(',', ''), errors='coerce')
+            dval = pd.to_datetime(row[date_col], errors='coerce')
+            if 'fii' in role or 'fpi' in role:
+                out['fii_net'] = None if pd.isna(val) else float(val)
+                out['date'] = None if pd.isna(dval) else dval.date().isoformat()
+            elif role == 'dii' or 'dii' in role:
+                out['dii_net'] = None if pd.isna(val) else float(val)
+                if out['date'] is None and not pd.isna(dval):
+                    out['date'] = dval.date().isoformat()
     except Exception:
         return out
     return out
@@ -126,7 +127,7 @@ def build_latest_table(df):
             'Value': float(last['Close']),
             'Change': change,
             'Pct Change': pct,
-            'Date': last['Date'].date().isoformat(),
+            'Date': pd.to_datetime(last['Date']).strftime('%Y-%m-%d %H:%M'),
             'High': float(last['High']) if pd.notna(last['High']) else None,
             'Low': float(last['Low']) if pd.notna(last['Low']) else None,
             'Note': DISPLAY_NOTES.get(metric, '')
@@ -140,16 +141,17 @@ def fmt_value(metric, v):
         return f'{v:.2f}%'
     return f'{v:,.2f}'
 
-def create_metric_chart(metric_df, metric_name):
+def create_metric_chart(metric_df, metric_name, live_mode=False):
+    label = 'Live' if live_mode else 'Close'
     fig = px.line(
         metric_df,
         x='Date',
         y='Close',
         markers=True,
-        title=metric_name,
+        title=f'{metric_name} ({label})',
         color_discrete_sequence=[CHART_COLORS.get(metric_name, '#2563eb')]
     )
-    fig.update_traces(line=dict(width=2.5), marker=dict(size=5))
+    fig.update_traces(line=dict(width=2.5), marker=dict(size=4))
     fig.update_layout(
         height=320,
         margin=dict(l=20, r=20, t=50, b=20),
@@ -160,19 +162,41 @@ def create_metric_chart(metric_df, metric_name):
     )
     return fig
 
+def create_cash_flow_chart(fii_dii):
+    rows = []
+    if fii_dii['fii_net'] is not None:
+        rows.append({'Metric': 'FII Net Cash', 'Value': fii_dii['fii_net']})
+    if fii_dii['dii_net'] is not None:
+        rows.append({'Metric': 'DII Net Cash', 'Value': fii_dii['dii_net']})
+    if not rows:
+        return None
+    df = pd.DataFrame(rows)
+    fig = px.bar(df, x='Metric', y='Value', color='Metric', color_discrete_map=CHART_COLORS)
+    fig.update_layout(height=320, margin=dict(l=20, r=20, t=40, b=20), showlegend=False, template='plotly_white')
+    return fig
+
 st.title('Daily Macro + India Market Dashboard')
 st.caption('Tracks DXY, US 10Y, Brent, Gold, USDINR, India VIX, FII/DII cash, and Nifty with live connectors where available.')
 
 with st.sidebar:
     st.header('Controls')
-    lookback = st.selectbox('History window', ['1mo', '3mo', '6mo', '1y'], index=2)
+    chart_mode = st.radio('Chart mode', ['Daily close', 'Live intraday'], index=0)
+    if chart_mode == 'Live intraday':
+        interval = st.selectbox('Live interval', ['1m', '2m', '5m', '15m', '30m', '60m'], index=2)
+        lookback = LIVE_PERIOD_MAP[interval]
+        auto_refresh = st.checkbox('Auto-refresh charts', value=True)
+        refresh_seconds = st.selectbox('Refresh every (seconds)', [10, 15, 30, 60, 120], index=2)
+    else:
+        lookback = st.selectbox('History window', ['1mo', '3mo', '6mo', '1y'], index=2)
+        interval = '1d'
+        auto_refresh = st.checkbox('Auto-refresh every 15 min', value=False)
+        refresh_seconds = 900
     selected = st.multiselect('Metrics', list(YF_TICKERS.keys()), default=list(YF_TICKERS.keys()))
-    auto_refresh = st.checkbox('Auto-refresh every 15 min', value=False)
-    if auto_refresh:
-        time.sleep(1)
-        st.rerun()
 
-hist = fetch_yf_history(period=lookback)
+if auto_refresh:
+    st.caption(f'Auto-refresh is ON. Dashboard refreshes every {refresh_seconds} seconds.')
+
+hist = fetch_yf_history(period=lookback, interval=interval)
 latest = build_latest_table(hist)
 fii_dii = fetch_fii_dii()
 
@@ -196,13 +220,17 @@ a.metric('FII net cash (Rs cr)', 'NA' if fii_dii['fii_net'] is None else f"{fii_
 b.metric('DII net cash (Rs cr)', 'NA' if fii_dii['dii_net'] is None else f"{fii_dii['dii_net']:,.2f}")
 c.metric('Data date', fii_dii['date'] or 'NA')
 
+cash_fig = create_cash_flow_chart(fii_dii)
+if cash_fig is not None:
+    st.plotly_chart(cash_fig, use_container_width=True)
+
 st.markdown('### Individual charts')
 for metric in selected:
     metric_df = hist[hist['Metric'] == metric][['Date', 'Close']].dropna().copy()
     if metric_df.empty:
         st.warning(f'No data available for {metric}.')
         continue
-    st.plotly_chart(create_metric_chart(metric_df, metric), use_container_width=True)
+    st.plotly_chart(create_metric_chart(metric_df, metric, live_mode=(chart_mode == 'Live intraday')), use_container_width=True)
 
 st.markdown('### Latest snapshot')
 show = latest[['Metric', 'Value', 'Change', 'Pct Change', 'Date', 'High', 'Low', 'Note']].copy()
@@ -213,7 +241,11 @@ st.download_button('Download latest snapshot CSV', data=csv, file_name='daily_da
 
 st.markdown('### Connector notes')
 st.markdown('''
-- Yahoo Finance powers DXY, US 10Y, Brent, Gold, USDINR, India VIX, and Nifty in this app.
-- FII/DII cash is scraped from the publicly visible Moneycontrol cash activity page.
-- If you want exchange-grade reliability, switch FII/DII and India VIX to official NSE endpoints or a licensed market data vendor.
+- Yahoo Finance supports intraday intervals including 1m, 2m, 5m, 15m, 30m, and 60m, with intraday history limits depending on interval.
+- Live intraday mode in this app uses those Yahoo Finance intervals and refreshes the page on a timed loop.
+- FII/DII cash is still end-of-day style institutional flow data from the NSE report page, so it does not update tick-by-tick during market hours.
 ''')
+
+if auto_refresh:
+    time.sleep(refresh_seconds)
+    st.rerun()
