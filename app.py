@@ -29,6 +29,16 @@ DISPLAY_NOTES = {
     "Nifty": "Nifty 50 index",
 }
 
+CHART_COLORS = {
+    "DXY": "#2563eb",
+    "US 10Y": "#7c3aed",
+    "Brent": "#ea580c",
+    "Gold": "#ca8a04",
+    "USDINR": "#0891b2",
+    "India VIX": "#dc2626",
+    "Nifty": "#16a34a",
+}
+
 @st.cache_data(ttl=900)
 def fetch_yf_history(period="6mo", interval="1d"):
     frames = []
@@ -43,9 +53,9 @@ def fetch_yf_history(period="6mo", interval="1d"):
             hist = hist.rename(columns={hist.columns[0]: 'Date'})
         hist['Metric'] = label
         hist['Ticker'] = ticker
-        frames.append(hist[['Date','Open','High','Low','Close','Volume','Metric','Ticker']])
+        frames.append(hist[['Date', 'Open', 'High', 'Low', 'Close', 'Volume', 'Metric', 'Ticker']])
     if not frames:
-        return pd.DataFrame(columns=['Date','Open','High','Low','Close','Volume','Metric','Ticker'])
+        return pd.DataFrame(columns=['Date', 'Open', 'High', 'Low', 'Close', 'Volume', 'Metric', 'Ticker'])
     df = pd.concat(frames, ignore_index=True)
     df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None)
     return df
@@ -130,6 +140,26 @@ def fmt_value(metric, v):
         return f'{v:.2f}%'
     return f'{v:,.2f}'
 
+def create_metric_chart(metric_df, metric_name):
+    fig = px.line(
+        metric_df,
+        x='Date',
+        y='Close',
+        markers=True,
+        title=metric_name,
+        color_discrete_sequence=[CHART_COLORS.get(metric_name, '#2563eb')]
+    )
+    fig.update_traces(line=dict(width=2.5), marker=dict(size=5))
+    fig.update_layout(
+        height=320,
+        margin=dict(l=20, r=20, t=50, b=20),
+        showlegend=False,
+        xaxis_title='',
+        yaxis_title='Value',
+        template='plotly_white'
+    )
+    return fig
+
 st.title('Daily Macro + India Market Dashboard')
 st.caption('Tracks DXY, US 10Y, Brent, Gold, USDINR, India VIX, FII/DII cash, and Nifty with live connectors where available.')
 
@@ -153,6 +183,7 @@ if latest.empty:
 latest = latest[latest['Metric'].isin(selected)]
 hist = hist[hist['Metric'].isin(selected)]
 
+st.markdown('### Latest KPIs')
 kpi_cols = st.columns(4)
 for i, (_, row) in enumerate(latest.iterrows()):
     col = kpi_cols[i % 4]
@@ -165,11 +196,13 @@ a.metric('FII net cash (Rs cr)', 'NA' if fii_dii['fii_net'] is None else f"{fii_
 b.metric('DII net cash (Rs cr)', 'NA' if fii_dii['dii_net'] is None else f"{fii_dii['dii_net']:,.2f}")
 c.metric('Data date', fii_dii['date'] or 'NA')
 
-st.markdown('### Trend view')
-plot_df = hist[['Date', 'Metric', 'Close']].dropna().copy()
-fig = px.line(plot_df, x='Date', y='Close', color='Metric', markers=False)
-fig.update_layout(height=520, legend_title_text='Metric', margin=dict(l=20, r=20, t=20, b=20))
-st.plotly_chart(fig, use_container_width=True)
+st.markdown('### Individual charts')
+for metric in selected:
+    metric_df = hist[hist['Metric'] == metric][['Date', 'Close']].dropna().copy()
+    if metric_df.empty:
+        st.warning(f'No data available for {metric}.')
+        continue
+    st.plotly_chart(create_metric_chart(metric_df, metric), use_container_width=True)
 
 st.markdown('### Latest snapshot')
 show = latest[['Metric', 'Value', 'Change', 'Pct Change', 'Date', 'High', 'Low', 'Note']].copy()
